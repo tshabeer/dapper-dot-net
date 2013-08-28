@@ -4,6 +4,11 @@
 
  Note: to build on C# 3.0 + .NET 3.5, include the CSHARP30 compiler symbol (and yes,
  I know the difference between language and runtime versions; this is a compromise).
+ 
+ It needs ENterpriseLibrary Transient faultblock
+ 
+ Install-Package EnterpriseLibrary.WindowsAzure.TransientFaultHandling
+ 
  */
 
 using System;
@@ -18,9 +23,13 @@ using System.Text;
 using System.Threading;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
+using Microsoft.Practices.EnterpriseLibrary.WindowsAzure.TransientFaultHandling;
+using Microsoft.Practices.EnterpriseLibrary.WindowsAzure.TransientFaultHandling.AzureStorage;
+using Microsoft.Practices.EnterpriseLibrary.WindowsAzure.TransientFaultHandling.SqlAzure;
+using System.Data.SqlClient;
 
 
-namespace Dapper
+namespace DriveRemoteService.DAL.DataAccess
 {
     /// <summary>
     /// Dapper, a light weight object mapper for ADO.NET
@@ -696,7 +705,7 @@ this IDbConnection cnn, string sql, dynamic param = null, IDbTransaction transac
             {
                 bool isFirst = true;
                 int total = 0;
-                using (var cmd = SetupCommand(cnn, transaction, sql, null, null, commandTimeout, commandType))
+                using (var cmd =(SqlCommand)SetupCommand(cnn, transaction, sql, null, null, commandTimeout, commandType))
                 {
 
                     string masterSql = null;
@@ -714,8 +723,8 @@ this IDbConnection cnn, string sql, dynamic param = null, IDbTransaction transac
                             cmd.CommandText = masterSql; // because we do magic replaces on "in" etc
                             cmd.Parameters.Clear(); // current code is Add-tastic
                         }
-                        info.ParamReader(cmd, obj);
-                        total += cmd.ExecuteNonQuery();
+                        info.ParamReader(cmd, obj);                        
+                        total += cmd.ExecuteNonQueryWithRetry();
                     }
                 }
                 return total;
@@ -807,14 +816,14 @@ this IDbConnection cnn, string sql, dynamic param = null, IDbTransaction transac
             Identity identity = new Identity(sql, commandType, cnn, typeof(GridReader), (object)param == null ? null : ((object)param).GetType(), null);
             CacheInfo info = GetCacheInfo(identity);
 
-            IDbCommand cmd = null;
+            SqlCommand cmd = null;
             IDataReader reader = null;
             bool wasClosed = cnn.State == ConnectionState.Closed;
             try
             {
                 if (wasClosed) cnn.Open();
-                cmd = SetupCommand(cnn, transaction, sql, info.ParamReader, (object)param, commandTimeout, commandType);
-                reader = cmd.ExecuteReader(wasClosed ? CommandBehavior.CloseConnection : CommandBehavior.Default);
+                cmd = (SqlCommand)SetupCommand(cnn, transaction, sql, info.ParamReader, (object)param, commandTimeout, commandType);                
+                reader =cmd.ExecuteReaderWithRetry(wasClosed ? CommandBehavior.CloseConnection : CommandBehavior.Default);
 
                 var result = new GridReader(cmd, reader, identity);
                 wasClosed = false; // *if* the connection was closed and we got this far, then we now have a reader
@@ -845,16 +854,16 @@ this IDbConnection cnn, string sql, dynamic param = null, IDbTransaction transac
             var identity = new Identity(sql, commandType, cnn, typeof(T), param == null ? null : param.GetType(), null);
             var info = GetCacheInfo(identity);
 
-            IDbCommand cmd = null;
+            SqlCommand cmd = null;
             IDataReader reader = null;
 
             bool wasClosed = cnn.State == ConnectionState.Closed;
             try
             {
-                cmd = SetupCommand(cnn, transaction, sql, info.ParamReader, param, commandTimeout, commandType);
+                cmd =(SqlCommand) SetupCommand(cnn, transaction, sql, info.ParamReader, param, commandTimeout, commandType);
 
-                if (wasClosed) cnn.Open();
-                reader = cmd.ExecuteReader(wasClosed ? CommandBehavior.CloseConnection : CommandBehavior.Default);
+                if (wasClosed) cnn.Open();                
+                reader = cmd.ExecuteReaderWithRetry(wasClosed ? CommandBehavior.CloseConnection : CommandBehavior.Default);
                 wasClosed = false; // *if* the connection was closed and we got this far, then we now have a reader
                 // with the CloseConnection flag, so the reader will deal with the connection; we
                 // still need something in the "finally" to ensure that broken SQL still results
@@ -1070,7 +1079,7 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
             identity = identity ?? new Identity(sql, commandType, cnn, typeof(TFirst), (object)param == null ? null : ((object)param).GetType(), new[] { typeof(TFirst), typeof(TSecond), typeof(TThird), typeof(TFourth), typeof(TFifth), typeof(TSixth), typeof(TSeventh) });
             CacheInfo cinfo = GetCacheInfo(identity);
 
-            IDbCommand ownedCommand = null;
+            SqlCommand ownedCommand = null;
             IDataReader ownedReader = null;
 
             bool wasClosed = cnn != null && cnn.State == ConnectionState.Closed;
@@ -1078,9 +1087,9 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
             {
                 if (reader == null)
                 {
-                    ownedCommand = SetupCommand(cnn, transaction, sql, cinfo.ParamReader, (object)param, commandTimeout, commandType);
+                    ownedCommand = (SqlCommand)SetupCommand(cnn, transaction, sql, cinfo.ParamReader, (object)param, commandTimeout, commandType);
                     if (wasClosed) cnn.Open();
-                    ownedReader = ownedCommand.ExecuteReader();
+                    ownedReader = ownedCommand.ExecuteReaderWithRetry();//ownedCommand.ExecuteReader();
                     reader = ownedReader;
                 }
                 DeserializerState deserializer = default(DeserializerState);
@@ -1610,7 +1619,7 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
             #endregion
         }
 #endif
-        private const string MultiMapSplitExceptionMessage = "When using the multi-mapping APIs ensure you set the splitOn param if you have keys other than Id";
+
 #if !CSHARP30
         internal static Func<IDataReader, object> GetDapperRowDeserializer(IDataRecord reader, int startBound, int length, bool returnNullIfFirstMissing)
         {
@@ -1622,7 +1631,7 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
 
             if (fieldCount <= startBound)
             {
-                throw new ArgumentException(MultiMapSplitExceptionMessage, "splitOn");
+                throw new ArgumentException("When using the multi-mapping APIs ensure you set the splitOn param if you have keys other than Id", "splitOn");
             }
 
             var effectiveFieldCount = Math.Min(fieldCount - startBound, length);
@@ -1682,7 +1691,7 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
 
             if (fieldCount <= startBound)
             {
-                throw new ArgumentException(MultiMapSplitExceptionMessage, "splitOn");
+                throw new ArgumentException("When using the multi-mapping APIs ensure you set the splitOn param if you have keys other than Id", "splitOn");
             }
 
             return
@@ -1828,7 +1837,7 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
 
         private static IEnumerable<PropertyInfo> FilterParameters(IEnumerable<PropertyInfo> parameters, string sql)
         {
-            return parameters.Where(p => Regex.IsMatch(sql, @"[?@:]" + p.Name + "([^a-zA-Z0-9_]+|$)", RegexOptions.IgnoreCase | RegexOptions.Multiline));
+            return parameters.Where(p => Regex.IsMatch(sql, "[@:]" + p.Name + "([^a-zA-Z0-9_]+|$)", RegexOptions.IgnoreCase | RegexOptions.Multiline));
         }
 
         /// <summary>
@@ -1861,8 +1870,7 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
                 if (filterParams)
                 {
                     if (identity.sql.IndexOf("@" + prop.Name, StringComparison.InvariantCultureIgnoreCase) < 0
-                        && identity.sql.IndexOf(":" + prop.Name, StringComparison.InvariantCultureIgnoreCase) < 0
-                        && identity.sql.IndexOf("?" + prop.Name, StringComparison.InvariantCultureIgnoreCase) < 0)
+                        && identity.sql.IndexOf(":" + prop.Name, StringComparison.InvariantCultureIgnoreCase) < 0)
                     { // can't see the parameter in the text (even in a comment, etc) - burn it with fire
                         continue;
                     }
@@ -2034,13 +2042,13 @@ this IDbConnection cnn, string sql, Func<TFirst, TSecond, TThird, TFourth, TRetu
 
         private static int ExecuteCommand(IDbConnection cnn, IDbTransaction transaction, string sql, Action<IDbCommand, object> paramReader, object obj, int? commandTimeout, CommandType? commandType)
         {
-            IDbCommand cmd = null;
+            SqlCommand cmd = null;
             bool wasClosed = cnn.State == ConnectionState.Closed;
             try
             {
-                cmd = SetupCommand(cnn, transaction, sql, paramReader, obj, commandTimeout, commandType);
+                cmd =(SqlCommand)SetupCommand(cnn, transaction, sql, paramReader, obj, commandTimeout, commandType);
                 if (wasClosed) cnn.Open();
-                return cmd.ExecuteNonQuery();
+                return cmd.ExecuteNonQueryWithRetry();
             }
             finally
             {
@@ -2175,7 +2183,7 @@ Type type, IDataReader reader, int startBound = 0, int length = -1, bool returnN
 
             if (reader.FieldCount <= startBound)
             {
-                throw new ArgumentException(MultiMapSplitExceptionMessage, "splitOn");
+                throw new ArgumentException("When using the multi-mapping APIs ensure you set the splitOn param if you have keys other than Id", "splitOn");
             }
 
             var names = Enumerable.Range(startBound, length).Select(i => reader.GetName(i)).ToArray();
@@ -2322,74 +2330,61 @@ Type type, IDataReader reader, int startBound = 0, int length = -1, bool returnN
                             else
                             {
                                 // not a direct match; need to tweak the unbox
-                                MethodInfo op;
-                                if ((op = GetOperator(dataType, nullUnderlyingType ?? unboxType)) != null)
-                                { // this is handy for things like decimal <===> double
-                                    il.Emit(OpCodes.Unbox_Any, dataType); // stack is now [target][target][data-typed-value]
-                                    il.Emit(OpCodes.Call, op); // stack is now [target][target][typed-value]
+                                bool handled = true;
+                                OpCode opCode = default(OpCode);
+                                if (dataTypeCode == TypeCode.Decimal || unboxTypeCode == TypeCode.Decimal)
+                                {   // no IL level conversions to/from decimal; I guess we could use the static operators, but
+                                    // this feels an edge-case
+                                    handled = false;
                                 }
                                 else
                                 {
-                                    bool handled = true;
-                                    OpCode opCode = default(OpCode);
-                                    if (dataTypeCode == TypeCode.Decimal || unboxTypeCode == TypeCode.Decimal)
-                                    {   // no IL level conversions to/from decimal; I guess we could use the static operators, but
-                                        // this feels an edge-case
-                                        handled = false;
-                                    }
-                                    else
+                                    switch (unboxTypeCode)
                                     {
-                                        switch (unboxTypeCode)
-                                        {
-                                            case TypeCode.Byte:
-                                                opCode = OpCodes.Conv_Ovf_I1_Un; break;
-                                            case TypeCode.SByte:
-                                                opCode = OpCodes.Conv_Ovf_I1; break;
-                                            case TypeCode.UInt16:
-                                                opCode = OpCodes.Conv_Ovf_I2_Un; break;
-                                            case TypeCode.Int16:
-                                                opCode = OpCodes.Conv_Ovf_I2; break;
-                                            case TypeCode.UInt32:
-                                                opCode = OpCodes.Conv_Ovf_I4_Un; break;
-                                            case TypeCode.Boolean: // boolean is basically an int, at least at this level
-                                            case TypeCode.Int32:
-                                                opCode = OpCodes.Conv_Ovf_I4; break;
-                                            case TypeCode.UInt64:
-                                                opCode = OpCodes.Conv_Ovf_I8_Un; break;
-                                            case TypeCode.Int64:
-                                                opCode = OpCodes.Conv_Ovf_I8; break;
-                                            case TypeCode.Single:
-                                                opCode = OpCodes.Conv_R4; break;
-                                            case TypeCode.Double:
-                                                opCode = OpCodes.Conv_R8; break;
-                                            default:
-                                                handled = false;
-                                                break;
-                                        }
-                                    }
-                                    if (handled)
-                                    { // unbox as the data-type, then use IL-level convert
-                                        il.Emit(OpCodes.Unbox_Any, dataType); // stack is now [target][target][data-typed-value]
-                                        il.Emit(opCode); // stack is now [target][target][typed-value]
-                                        if (unboxTypeCode == TypeCode.Boolean)
-                                        { // compare to zero; I checked "csc" - this is the trick it uses; nice
-                                            il.Emit(OpCodes.Ldc_I4_0);
-                                            il.Emit(OpCodes.Ceq);
-                                            il.Emit(OpCodes.Ldc_I4_0);
-                                            il.Emit(OpCodes.Ceq);
-                                        }
-                                    }
-                                    else
-                                    { // use flexible conversion
-                                        il.Emit(OpCodes.Ldtoken, nullUnderlyingType ?? unboxType); // stack is now [target][target][value][member-type-token]
-                                        il.EmitCall(OpCodes.Call, typeof(Type).GetMethod("GetTypeFromHandle"), null); // stack is now [target][target][value][member-type]
-                                        il.EmitCall(OpCodes.Call, typeof(Convert).GetMethod("ChangeType", new Type[] { typeof(object), typeof(Type) }), null); // stack is now [target][target][boxed-member-type-value]
-                                        il.Emit(OpCodes.Unbox_Any, nullUnderlyingType ?? unboxType); // stack is now [target][target][typed-value]
+                                        case TypeCode.Byte:
+                                            opCode = OpCodes.Conv_Ovf_I1_Un; break;
+                                        case TypeCode.SByte:
+                                            opCode = OpCodes.Conv_Ovf_I1; break;
+                                        case TypeCode.UInt16:
+                                            opCode = OpCodes.Conv_Ovf_I2_Un; break;
+                                        case TypeCode.Int16:
+                                            opCode = OpCodes.Conv_Ovf_I2; break;
+                                        case TypeCode.UInt32:
+                                            opCode = OpCodes.Conv_Ovf_I4_Un; break;
+                                        case TypeCode.Boolean: // boolean is basically an int, at least at this level
+                                        case TypeCode.Int32:
+                                            opCode = OpCodes.Conv_Ovf_I4; break;
+                                        case TypeCode.UInt64:
+                                            opCode = OpCodes.Conv_Ovf_I8_Un; break;
+                                        case TypeCode.Int64:
+                                            opCode = OpCodes.Conv_Ovf_I8; break;
+                                        case TypeCode.Single:
+                                            opCode = OpCodes.Conv_R4; break;
+                                        case TypeCode.Double:
+                                            opCode = OpCodes.Conv_R8; break;
+                                        default:
+                                            handled = false;
+                                            break;
                                     }
                                 }
-                                if (nullUnderlyingType != null)
-                                {
-                                    il.Emit(OpCodes.Newobj, unboxType.GetConstructor(new[] { nullUnderlyingType })); // stack is now [target][target][typed-value]
+                                if (handled)
+                                { // unbox as the data-type, then use IL-level convert
+                                    il.Emit(OpCodes.Unbox_Any, dataType); // stack is now [target][target][data-typed-value]
+                                    il.Emit(opCode); // stack is now [target][target][typed-value]
+                                    if (unboxTypeCode == TypeCode.Boolean)
+                                    { // compare to zero; I checked "csc" - this is the trick it uses; nice
+                                        il.Emit(OpCodes.Ldc_I4_0);
+                                        il.Emit(OpCodes.Ceq);
+                                        il.Emit(OpCodes.Ldc_I4_0);
+                                        il.Emit(OpCodes.Ceq);
+                                    }
+                                }
+                                else
+                                { // use flexible conversion
+                                    il.Emit(OpCodes.Ldtoken, unboxType); // stack is now [target][target][value][member-type-token]
+                                    il.EmitCall(OpCodes.Call, typeof(Type).GetMethod("GetTypeFromHandle"), null); // stack is now [target][target][value][member-type]
+                                    il.EmitCall(OpCodes.Call, typeof(Convert).GetMethod("ChangeType", new Type[] { typeof(object), typeof(Type) }), null); // stack is now [target][target][boxed-member-type-value]
+                                    il.Emit(OpCodes.Unbox_Any, unboxType); // stack is now [target][target][typed-value]
                                 }
 
                             }
@@ -2480,27 +2475,6 @@ Type type, IDataReader reader, int startBound = 0, int length = -1, bool returnN
             il.Emit(OpCodes.Ret);
 
             return (Func<IDataReader, object>)dm.CreateDelegate(typeof(Func<IDataReader, object>));
-        }
-        static MethodInfo GetOperator(Type from, Type to)
-        {
-            if (to == null) return null;
-            MethodInfo[] fromMethods, toMethods;
-            return ResolveOperator(fromMethods = from.GetMethods(BindingFlags.Static | BindingFlags.Public), from, to, "op_Implicit")
-                ?? ResolveOperator(toMethods = to.GetMethods(BindingFlags.Static | BindingFlags.Public), from, to, "op_Implicit")
-                ?? ResolveOperator(fromMethods, from, to, "op_Explicit")
-                ?? ResolveOperator(toMethods, from, to, "op_Explicit");
-            
-        }
-        static MethodInfo ResolveOperator(MethodInfo[] methods, Type from, Type to, string name)
-        {
-            for (int i = 0; i < methods.Length; i++)
-            {
-                if (methods[i].Name != name || methods[i].ReturnType != to) continue;
-                var args = methods[i].GetParameters();
-                if (args.Length != 1 || args[0].ParameterType != from) continue;
-                return methods[i];
-            }
-            return null;
         }
 
         private static void LoadLocal(ILGenerator il, int index)
@@ -3125,7 +3099,7 @@ string name, object value = null, DbType? dbType = null, ParameterDirection? dir
     /// <summary>
     /// This class represents a SQL string, it can be used if you need to denote your parameter is a Char vs VarChar vs nVarChar vs nChar
     /// </summary>
-    sealed partial class DbString : Dapper.SqlMapper.ICustomQueryParameter
+    sealed partial class DbString : SqlMapper.ICustomQueryParameter
     {
         /// <summary>
         /// Create a new DbString
