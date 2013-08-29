@@ -1,8 +1,10 @@
-Dapper - a simple object mapper for .Net
-========================================
+Dapper - a simple object mapper for .Net (SQL Azure support added)
+==================================================================
 
 Features
 --------
+Now added SQL Azure support (available for .NET 4.0).
+
 Dapper is a [single file](https://github.com/SamSaffron/dapper-dot-net/blob/master/Dapper/SqlMapper.cs) you can drop in to your project that will extend your IDbConnection interface.
 
 It provides 3 helpers:
